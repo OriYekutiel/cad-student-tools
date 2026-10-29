@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SVG Bounding Rectangle · Fusion-ready</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#18252a;background:#f3f6f5;font-synthesis:none}*{box-sizing:border-box}
+body{margin:0;padding:32px 16px}.shell{max-width:840px;margin:0 auto}
+header{margin:0 0 22px}h1{font-size:clamp(24px,4vw,34px);letter-spacing:-.04em;line-height:1.14;margin:0 0 8px}header p{line-height:1.5;color:#576568;margin:0}
+.panel{background:white;border:1px solid #dbe3e1;border-radius:16px;box-shadow:0 7px 26px #1228240d;padding:20px}
+#drop{border:2px dashed #a5bdb7;border-radius:12px;padding:27px 16px;text-align:center;cursor:pointer;background:#f7faf9;transition:.15s}
+#drop.drag{background:#e7f4ee;border-color:#157a58}#drop strong{display:block;font-size:17px;margin-bottom:6px}#drop span{color:#61716c;font-size:14px}
+input[type=file]{display:none}.top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:18px;flex-wrap:wrap}.tiny{color:#586660;font-size:13px}.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{border:0;border-radius:9px;padding:11px 16px;font:inherit;font-weight:650;cursor:pointer;background:#177556;color:#fff}button:disabled{opacity:.45;cursor:not-allowed}button.secondary{background:#ebf2ef;color:#204236}
+#stage{display:none;margin-top:18px}#preview{display:flex;align-items:center;justify-content:center;height:min(53vh,360px);min-height:230px;border:1px solid #e2e8e5;border-radius:12px;overflow:hidden;background-color:#fff;background-image:linear-gradient(45deg,#f1f3f2 25%,transparent 25%),linear-gradient(-45deg,#f1f3f2 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#f1f3f2 75%),linear-gradient(-45deg,transparent 75%,#f1f3f2 75%);background-size:20px 20px;background-position:0 0,0 10px,10px -10px,-10px 0}
+#preview svg{display:block;max-width:95%;max-height:95%;width:auto;height:auto;overflow:visible;filter:drop-shadow(0 2px 2px #0001)}
+#metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:15px 0 4px}.metric{padding:11px 12px;border-radius:9px;background:#f3f6f5}.metric label{display:block;color:#65726f;font-size:12px}.metric span{display:block;font-weight:650;font-variant-numeric:tabular-nums;word-break:break-all;font-size:15px;margin-top:3px}
+#status{margin:13px 0 0;color:#4e645b;line-height:1.45;font-size:13px}.note{font-size:13px;line-height:1.6;color:#63706c;margin:17px 2px 0}.check{font-size:14px;color:#273c34;display:flex;align-items:center;gap:7px}.check input{accent-color:#177556}.stroke-note{margin:11px 2px 0;font-size:13px;line-height:1.55;color:#576568}.stroke-note strong{color:#354b44}
+@media(max-width:520px){body{padding:18px 12px}.panel{padding:14px}#metrics{grid-template-columns:repeat(2,minmax(0,1fr))}button{width:100%}.actions{width:100%}}
+</style>
+</head>
+<body>
+<div class="shell">
+<header><h1>SVG Bounding Rectangle</h1><p>A tiny offline tool for Fusion: load an SVG, automatically create an axis-aligned vector rectangle around its vector geometry, and download the modified SVG.</p></header>
+<main class="panel">
+<div id="drop" tabindex="0" role="button" aria-label="Choose an SVG file"><strong>Drop an SVG here</strong><span>or click to choose a file · Nothing is uploaded</span></div>
+<input id="file" type="file" accept=".svg,image/svg+xml">
+<div id="stage">
+<div class="top"><div class="tiny" id="filename"></div><label class="check"><input id="showBox" type="checkbox" checked> Show rectangle</label></div>
+<div id="preview" aria-label="SVG preview with bounding box"></div>
+<p class="stroke-note"><strong>About visual strokes:</strong> The rectangle follows the exact outer limits of the SVG path geometry, not its stroke thickness. If a stroke appears to extend beyond the rectangle, this is normal: SVG strokes are drawn across the path. The geometric bounding rectangle is still correct for scaling in Fusion.</p>
+<div id="metrics"><div class="metric"><label>X</label><span id="mx"></span></div><div class="metric"><label>Y</label><span id="my"></span></div><div class="metric"><label>Width</label><span id="mw"></span></div><div class="metric"><label>Height</label><span id="mh"></span></div></div>
+<div class="top"><span class="tiny">Coordinates in original SVG user units</span><div class="actions"><button id="download">Download modified SVG</button><button class="secondary" id="reset">New file</button></div></div>
+</div>
+<div id="status" role="status">Supports vector SVG shapes, including curves and transformed groups.</div>
+</main>
+<p class="note"><b>For Fusion:</b> Insert → Insert SVG. The added rectangle is a separate closed vector element (<code>id="fusion-bounding-rectangle"</code>) with no optional margin. Visible stroke thickness is deliberately excluded from the measurement. The original artwork and its appearance are preserved for ordinary vector SVGs. Complex sharp miter joins, clipping, masks, filters, external content, raster-image transparency or unusual nested viewports should be checked manually.</p>
+</div>
+<div id="measure" style="position:absolute;left:-100000px;top:0;opacity:0;pointer-events:none;overflow:visible" aria-hidden="true"></div>
+<script>
+'use strict';
+const q=id=>document.getElementById(id);
+const NS='http://www.w3.org/2000/svg';
+let result=null;
+const blocked=new Set(['script','foreignObject','iframe','object','embed','audio','video','canvas']);
+function sanitize(node){
+ for(const child of Array.from(node.children)){
+  if(blocked.has(child.localName)) {child.remove();continue;}
+  sanitize(child);
+ }
+ if(!node.attributes)return;
+ for(const a of Array.from(node.attributes)){
+  const value=a.value.trim();
+  if(/^on/i.test(a.name) || /javascript\s*:/i.test(value) || ((a.localName==='href'||a.name==='src') && value && !value.startsWith('#') && !value.startsWith('data:image/')) || (/(?:url\s*\(\s*['"]?\s*https?:|@import)/i.test(value))) node.removeAttributeNode(a);
+ }
+ if(node.localName==='style' && /@import|url\s*\(\s*['"]?\s*https?:/i.test(node.textContent))node.remove();
+}
+function number(n){return String(Number(n.toPrecision(12)));}
+// SVG getBBox() calculates the outermost geometric limits of paths, lines,
+// corners, curves, and transformed groups. Stroke thickness is intentionally
+// excluded because Fusion imports SVG vector paths, not their visual strokes.
+function setStatus(s,error=false){q('status').textContent=s;q('status').style.color=error?'#ae3d34':'#4e645b';}
+function view(svg){
+ const cloned=svg.cloneNode(true);cloned.removeAttribute('width');cloned.removeAttribute('height');
+ cloned.style.maxWidth='95%';cloned.style.maxHeight='95%';
+ // For preview only, make the complete measured geometry visible if source has a cropped canvas.
+ if(result && !cloned.hasAttribute('viewBox')) {
+  const b=result.box;
+  cloned.setAttribute('viewBox',[number(b.x),number(b.y),number(b.width),number(b.height)].join(' '));
+ }
+ q('preview').replaceChildren(cloned);
+}
+async function openFile(file){
+ if(!file)return;
+ if(!file.name.toLowerCase().endsWith('.svg') && file.type!=='image/svg+xml') {setStatus('Please choose an SVG file.',true);return;}
+ try{
+  const raw=await file.text();
+  if(raw.length>8_000_000) throw Error('File is too large for this simple viewer (8 MB limit).');
+  const doc=new DOMParser().parseFromString(raw,'image/svg+xml');
+  if(doc.querySelector('parsererror')||doc.documentElement.localName!=='svg')throw Error('The file is not a valid SVG.');
+  const svg=document.importNode(doc.documentElement,true);
+  sanitize(svg);
+  if(!svg.getAttribute('xmlns'))svg.setAttribute('xmlns',NS);
+  for(const stale of svg.querySelectorAll('[id="fusion-bounding-rectangle"]'))stale.remove();
+  q('measure').replaceChildren(svg);
+  // getBBox() measures SVG geometry (including descendants' internal transformations),
+  // rather than merely reading the document's potentially oversized viewBox.
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  const b=svg.getBBox();
+  const coords={x:b.x,y:b.y,width:b.width,height:b.height};
+  if(Object.values(coords).some(v=>!Number.isFinite(v))||b.width<=0||b.height<=0)throw Error('Could not measure vector geometry in this SVG.');
+  const rect=doc.createElementNS(NS,'rect');
+  rect.setAttribute('id','fusion-bounding-rectangle');
+  rect.setAttribute('x',number(coords.x));rect.setAttribute('y',number(coords.y));
+  rect.setAttribute('width',number(coords.width));rect.setAttribute('height',number(coords.height));
+  rect.setAttribute('fill','none');rect.setAttribute('stroke','#e23d34');
+  rect.setAttribute('stroke-width',number(Math.min(coords.width,coords.height)*0.002));
+  rect.setAttribute('vector-effect','non-scaling-stroke');
+  rect.setAttribute('pointer-events','none');
+  svg.appendChild(rect);
+  // Move actual edited SVG outside the visible page: export preserves it unchanged.
+  const exportSvg=svg.cloneNode(true);
+  result={svg:exportSvg,box:coords,file:file.name};
+  q('measure').replaceChildren();
+  q('stage').style.display='block';q('filename').textContent=file.name;
+  for(const [k,id] of [['x','mx'],['y','my'],['width','mw'],['height','mh']])q(id).textContent=number(coords[k]);
+  q('showBox').checked=true;view(result.svg);
+  setStatus('Bounding rectangle generated from SVG path geometry (strokes excluded). Ready for Fusion.');
+ }catch(e){result=null;q('stage').style.display='none';q('measure').replaceChildren();setStatus(e.message||'Could not process this SVG.',true);}
+}
+q('showBox').addEventListener('change',()=>{
+ if(!result)return;const svg=result.svg.cloneNode(true);
+ const rect=svg.querySelector('[id="fusion-bounding-rectangle"]');if(rect)rect.style.display=q('showBox').checked?'':'none';
+ view(svg);
+});
+q('download').addEventListener('click',()=>{
+ if(!result)return;
+ const raw='<?xml version="1.0" encoding="UTF-8"?>\n'+new XMLSerializer().serializeToString(result.svg);
+ const blob=new Blob([raw],{type:'image/svg+xml;charset=utf-8'}),url=URL.createObjectURL(blob);
+ const a=document.createElement('a');a.href=url;a.download=result.file.replace(/\.svg$/i,'')+'_bounded.svg';a.click();
+ setTimeout(()=>URL.revokeObjectURL(url),2000);
+});
+function reset(){result=null;q('stage').style.display='none';q('file').value='';setStatus('Supports vector SVG shapes, including curves and transformed groups.');}
+q('reset').onclick=reset;
+q('drop').onclick=()=>q('file').click();
+q('drop').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();q('file').click();}};
+q('file').onchange=e=>openFile(e.target.files[0]);
+for(const event of ['dragenter','dragover'])q('drop').addEventListener(event,e=>{e.preventDefault();q('drop').classList.add('drag');});
+for(const event of ['dragleave','drop'])q('drop').addEventListener(event,e=>{e.preventDefault();q('drop').classList.remove('drag');});
+q('drop').addEventListener('drop',e=>openFile(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
